@@ -11,6 +11,19 @@
  *  The generic network handler delegates platform-dependent tasks to the platform network handler
  */
 
+#ifdef _AFL_DUMP
+ #include <stdlib.h>
+ #include <unistd.h>
+#endif
+#ifdef _AFL_PERSISTENT_SHIM
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <signal.h>
+ #include <strings.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
+#endif
+
 #include <assert.h>
 
 #include "generic_networkhandler.h"
@@ -251,7 +264,34 @@ void CheckAndHandleTcpListenerSocket(void) {
 
 EipStatus NetworkHandlerProcessOnce(void) {
 
+#ifdef _AFL_PERSISTENT_SHIM
+  size_t insize;
+  struct sockaddr_in servaddr;
+  int fd;
+  char *env_dest_ip = getenv("AFL_DEST_IP");
+  char *env_dest_port = getenv("AFL_DEST_PORT");
+  int dest_port = env_dest_port ? strtol(env_dest_port, NULL, 10) : 44818;
+  char *dest_ip = env_dest_ip ? env_dest_ip : "127.0.0.1";
+  bzero(&servaddr, sizeof(servaddr));
+  servaddr.sin_family = AF_INET;
+  servaddr.sin_addr.s_addr = inet_addr(dest_ip);
+  servaddr.sin_port = htons(dest_port);
+  char* afl_buf[PC_OPENER_ETHERNET_BUFFER_SIZE];
+  static done = 0;
+#endif // _AFL_PERSISTENT_SHIM
+
   read_socket = master_socket;
+
+#ifdef _AFL_PERSISTENT_SHIM
+  if (getenv("AFL_PERSISTENT") && !done) {
+     memset(afl_buf, 0, PC_OPENER_ETHERNET_BUFFER_SIZE);
+     insize = read(0, afl_buf, PC_OPENER_ETHERNET_BUFFER_SIZE);
+	 fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+	 connect(fd, (struct sockaddr *)&servaddr, sizeof(servaddr));
+     send(fd, afl_buf, insize, 0);
+	 done = 1;
+  }
+#endif // _AFL_PERSISTENT_SHIM
 
   g_time_value.tv_sec = 0;
   g_time_value.tv_usec = (
@@ -306,6 +346,14 @@ EipStatus NetworkHandlerProcessOnce(void) {
     ManageConnections(g_network_status.elapsed_time);
     g_network_status.elapsed_time = 0;
   }
+
+#ifdef _AFL_PERSISTENT_SHIM
+  if (getenv("AFL_PERSISTENT") && !ready_socket) {
+	close(fd);
+	exit(0);
+  }
+#endif // _AFL_PERSISTENT_SHIM
+
   return kEipStatusOk;
 }
 
@@ -482,6 +530,13 @@ EipStatus HandleDataOnTcpSocket(int socket) {
 	free(error_message);
     return kEipStatusError;
   }
+
+#ifdef _AFL_DUMP
+  char filename[] = "~/afl-samples/reqXXXXXX";
+  int fd = mkstemp(filename);
+  write(fd, g_ethernet_communication_buffer, number_of_read_bytes+4);
+  close(fd);
+#endif
 
   EipUint8 *read_buffer = &g_ethernet_communication_buffer[2]; /* at this place EIP stores the data length */
   size_t data_size = GetIntFromMessage(&read_buffer)
